@@ -118,7 +118,7 @@ class PJMModule:
             y_title="Average LMP (¢/kWh)"
         )
         
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart)
     
     def render(self):
         """Main render function for PJM module"""

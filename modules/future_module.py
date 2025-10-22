@@ -152,27 +152,6 @@ class FutureModule:
         
         return selected_edc
     
-    def create_egs_filters(self, data, selected_edc):
-        """Create EGS supplier filters for selected EDC"""
-        if data.empty or not selected_edc:
-            return []
-        
-        edc_data = data[data['edc'] == selected_edc]
-        available_egs = sorted(edc_data['egs'].unique())
-        
-        st.subheader(f"Select EGS Suppliers for {selected_edc}")
-        
-        # Create columns for EGS checkboxes
-        cols = st.columns(3)
-        
-        selected_egs = []
-        for i, egs in enumerate(available_egs):
-            col_idx = i % 3
-            with cols[col_idx]:
-                if st.checkbox(egs, value=True, key=f"egs_{egs}"):
-                    selected_egs.append(egs)
-        
-        return selected_egs
     
     def calculate_statistics(self, data, selected_edc, selected_egs):
         """Calculate min, max, median, average prices for selected EDC and EGS suppliers"""
@@ -317,7 +296,7 @@ class FutureModule:
             height=500
         )
         
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart)
     
     def render(self):
         """Main render function for future module"""
@@ -338,11 +317,12 @@ class FutureModule:
             st.info("Please select an EDC to begin analysis.")
             return
         
-        # Create EGS filters for selected EDC
-        selected_egs = self.create_egs_filters(egs_data, selected_edc)
+        # Get all EGS suppliers for the selected EDC
+        edc_data = egs_data[egs_data['edc'] == selected_edc]
+        selected_egs = sorted(edc_data['egs'].unique())
         
         if not selected_egs:
-            st.warning("Please select at least one EGS supplier to display.")
+            st.warning("No EGS suppliers found for the selected EDC.")
             return
         
         # Calculate statistics

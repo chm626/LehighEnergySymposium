@@ -37,5 +37,11 @@ class Settings:
             'module': 'future_module', 
             'class': 'FutureModule',
             'description': 'Compare EGS retail prices to PJM wholesale prices by EDC'
+        },
+        {
+            'name': 'EGS Fee Analysis',
+            'module': 'fees_module', 
+            'class': 'FeesModule',
+            'description': 'Analyze EGS signup fees by EDC and supplier'
         }
     ]
