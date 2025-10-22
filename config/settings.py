@@ -33,9 +33,9 @@ class Settings:
             'description': 'Analyze PJM Locational Marginal Prices'
         },
         {
-            'name': 'Future Analysis',
+            'name': 'EGS Pricing Analysis',
             'module': 'future_module', 
             'class': 'FutureModule',
-            'description': 'Placeholder for future modules'
+            'description': 'Compare EGS retail prices to PJM wholesale prices by EDC'
         }
     ]

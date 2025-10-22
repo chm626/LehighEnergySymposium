@@ -1,4 +1,3 @@
-# PJM-specific module for LMP analysis
 import pandas as pd
 import streamlit as st
 from core.database import db_manager
