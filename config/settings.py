@@ -39,6 +39,12 @@ class Settings:
             'description': 'Compare EGS retail prices to PJM wholesale prices by EDC'
         },
         {
+            'name': 'PTC Analysis',
+            'module': 'ptc_module',
+            'class': 'PTCModule',
+            'description': 'Compare PTC rates to EGS retail prices and PJM wholesale prices by EDC'
+        },
+        {
             'name': 'EGS Fee Analysis',
             'module': 'fees_module', 
             'class': 'FeesModule',

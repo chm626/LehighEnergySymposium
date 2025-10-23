@@ -3,6 +3,7 @@ import streamlit as st
 import importlib
 from config.settings import Settings
 from core.database import db_manager
+from core.shared_data import shared_data_manager
 
 # Page configuration
 st.set_page_config(
@@ -27,6 +28,16 @@ def main():
     # Header
     st.title(Settings.APP_TITLE)
     st.markdown(f"*{Settings.APP_DESCRIPTION}*")
+    
+    # Preload shared data (this will cache all data for all modules)
+    with st.spinner("Loading data..."):
+        try:
+            # Initialize shared data cache
+            shared_data_manager.get_raw_egs_data()
+            shared_data_manager.get_raw_pjm_data()
+            shared_data_manager.get_raw_ptc_data()
+        except Exception as e:
+            st.error(f"Failed to load shared data: {e}")
     
     # Create tabs
     tab_names = [module['name'] for module in Settings.AVAILABLE_MODULES]
