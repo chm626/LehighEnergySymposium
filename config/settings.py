@@ -49,5 +49,11 @@ class Settings:
             'module': 'fees_module', 
             'class': 'FeesModule',
             'description': 'Analyze EGS signup fees by EDC and supplier'
+        },
+        {
+            'name': 'EGS vs PTC Comparison',
+            'module': 'egs_vs_ptc_module',
+            'class': 'EGSvsPTCModule',
+            'description': 'Compare individual EGS offers to PTC rates to identify above/below PTC offers'
         }
     ]

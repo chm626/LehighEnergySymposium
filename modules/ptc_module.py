@@ -31,6 +31,16 @@ class PTCModule:
         """Get EGS data conformed to PTC-like characteristics (uses shared cached data)"""
         return shared_data_manager.get_egs_data_for_ptc_module(edc=edc, conform=True)
     
+    def preload_egs_data_for_edc(self, edc):
+        """Preload both regular and conformed EGS data for seamless switching"""
+        if edc is None:
+            return None, None
+        
+        # Get both datasets
+        regular_egs = shared_data_manager.get_egs_data_for_ptc_module(edc=edc, conform=False)
+        conformed_egs = shared_data_manager.get_egs_data_for_ptc_module(edc=edc, conform=True)
+        
+        return regular_egs, conformed_egs
     
     def get_pjm_data_for_edc(self, edc):
         """Get monthly averaged PJM data for a specific EDC (uses shared cached data)"""
@@ -92,40 +102,56 @@ class PTCModule:
             return pd.DataFrame()
     
     def create_edc_selector(self, data):
-        """Create EDC selection interface"""
+        """Create EDC selection interface with session state"""
         if data.empty:
             return None
         
         available_edcs = sorted(data['edc'].unique())
+        
+        # Initialize session state for EDC selection
+        if 'selected_edc' not in st.session_state:
+            st.session_state.selected_edc = None
         
         st.subheader("Select EDC to Analyze")
         
         # Create columns for EDC selection
         cols = st.columns(3)
         
-        selected_edc = None
         for i, edc in enumerate(available_edcs):
             col_idx = i % 3
             with cols[col_idx]:
                 if st.button(edc, key=f"ptc_edc_{edc}"):
-                    selected_edc = edc
+                    st.session_state.selected_edc = edc
         
-        return selected_edc
+        return st.session_state.selected_edc
     
-    def create_conform_button(self):
-        """Create conform EGS data button"""
-        st.subheader("EGS Data Options")
-        col1, col2 = st.columns(2)
+    def create_chart_options(self):
+        """Create chart options with conform checkbox integrated"""
+        st.subheader("Chart Options")
         
-        with col1:
-            conform_egs = st.button("Conform EGS Data", 
-                                  help="Filter EGS data to match PTC characteristics: 12-month terms, no cancel fees, fixed rates")
+        show_all_edcs = st.checkbox(
+            "Show All EDCs Average",
+            value=False,
+            help="Display averaged data across all EDCs instead of individual EDC analysis"
+        )
         
-        with col2:
-            show_all_edcs = st.button("Show All EDCs Average", 
-                                    help="Display averaged data across all EDCs")
+        return show_all_edcs
+    
+    def create_conform_checkbox(self):
+        """Create conform checkbox right above the chart with session state"""
+        # Initialize session state for conform checkbox
+        if 'conform_egs' not in st.session_state:
+            st.session_state.conform_egs = False
         
-        return conform_egs, show_all_edcs
+        conform_egs = st.checkbox(
+            "Conform EGS Data",
+            value=st.session_state.conform_egs,
+            help="Filter EGS data to match PTC characteristics: 12-month terms, no cancel fees, fixed rates"
+        )
+        
+        # Update session state
+        st.session_state.conform_egs = conform_egs
+        return conform_egs
     
     def create_all_edcs_chart(self):
         """Create chart showing averages across all EDCs"""
@@ -448,8 +474,8 @@ class PTCModule:
         st.header("PTC Analysis")
         st.write("Compare PTC rates to EGS retail prices and PJM wholesale prices by EDC")
         
-        # Create conform button and all-EDCs option
-        conform_egs, show_all_edcs = self.create_conform_button()
+        # Create chart options
+        show_all_edcs = self.create_chart_options()
         
         # Show all-EDCs average chart if requested
         if show_all_edcs:
@@ -471,21 +497,26 @@ class PTCModule:
             st.info("Please select an EDC to begin analysis.")
             return
         
-        # Get EGS and PJM data for comparison
-        if conform_egs:
-            egs_data = self.get_conformed_egs_data(selected_edc)
-            egs_label = "Conformed EGS"
-        else:
-            egs_data = self.get_egs_data_averaged(selected_edc)
-            egs_label = "EGS Average"
-        
+        # Preload both EGS datasets for seamless switching
+        regular_egs_data, conformed_egs_data = self.preload_egs_data_for_edc(selected_edc)
         pjm_data = self.get_pjm_data_for_edc(selected_edc)
         
-        # Calculate statistics
-        stats = self.calculate_statistics(ptc_data, egs_data, pjm_data, selected_edc)
+        # Calculate statistics using regular EGS data
+        stats = self.calculate_statistics(ptc_data, regular_egs_data, pjm_data, selected_edc)
         
         # Create data summary
         self.create_data_summary(stats, selected_edc)
+        
+        # Create conform checkbox right above the chart
+        conform_egs = self.create_conform_checkbox()
+        
+        # Switch between preloaded datasets based on checkbox state
+        if conform_egs:
+            egs_data = conformed_egs_data
+            egs_label = "Conformed EGS"
+        else:
+            egs_data = regular_egs_data
+            egs_label = "EGS Average"
         
         # Create comparison chart
         self.create_comparison_chart(ptc_data, egs_data, pjm_data, selected_edc, egs_label)
