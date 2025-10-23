@@ -21,10 +21,10 @@ class FeesModule:
         }
     
     @st.cache_data
-    def get_fees_data(_self, edc=None):
-        """Get fees data from WattBuy view with time series data"""
+    def get_fees_data(_self):
+        """Get fees data from WattBuy view for PPL only, with date filtering from 2015"""
         try:
-            # Query for v_wattbuy_simple with all fee types and date
+            # Query for v_wattbuy_simple with all fee types and date, filtered to PPL and 2015+
             query = """
             SELECT 
                 YEAR(date) as year,
@@ -35,7 +35,9 @@ class FeesModule:
                 monthly_charge,
                 early_term_fee_min
             FROM v_wattbuy_simple 
-            WHERE edc IS NOT NULL AND egs IS NOT NULL
+            WHERE edc = 'PPL Electric Utilities' 
+            AND edc IS NOT NULL AND egs IS NOT NULL
+            AND YEAR(date) >= 2015
             """
             
             # Get data from WattBuy view
@@ -49,6 +51,11 @@ class FeesModule:
             df['monthly_charge'] = pd.to_numeric(df['monthly_charge'], errors='coerce')
             df['early_term_fee_min'] = pd.to_numeric(df['early_term_fee_min'], errors='coerce')
             
+            # Convert fees from cents to dollars (divide by 100)
+            df['enrollment_fee'] = df['enrollment_fee'] / 100
+            df['monthly_charge'] = df['monthly_charge'] / 100
+            df['early_term_fee_min'] = df['early_term_fee_min'] / 100
+            
             # Remove negative values and extreme outliers (fees > $500 are likely errors)
             # Only filter rows where ALL fee columns are invalid, not just one
             df = df[
@@ -58,10 +65,6 @@ class FeesModule:
                     ((df['early_term_fee_min'] < 0) | (df['early_term_fee_min'] > 500))
                 )
             ]
-            
-            # Filter by EDC if specified
-            if edc:
-                df = df[df['edc'] == edc]
             
             # Remove EGS suppliers that have never had any fees of any type
             # Keep only EGS suppliers that have at least one non-null, non-zero fee
@@ -103,14 +106,15 @@ class FeesModule:
         st.subheader("Select Fee Type to Analyze")
         
         fee_types = {
-            'Signup Fee': 'enrollment_fee',
-            'Monthly Fee': 'monthly_charge', 
+            'Monthly Fee': 'monthly_charge',
+            'Signup Fee': 'enrollment_fee', 
             'Termination Fee': 'early_term_fee_min'
         }
         
         selected_fee_type = st.selectbox(
             "Choose the fee type to analyze:",
             options=list(fee_types.keys()),
+            index=0,  # Default to Monthly Fee
             key="fee_type_selector"
         )
         
@@ -209,7 +213,7 @@ class FeesModule:
         display_df['Min Fee'] = display_df['Min Fee'].apply(lambda x: f"${x:.2f}")
         display_df['Max Fee'] = display_df['Max Fee'].apply(lambda x: f"${x:.2f}")
         
-        st.dataframe(display_df, width='stretch')
+        st.dataframe(display_df, use_container_width=True)
     
     def create_fees_chart(self, data, selected_edc, fee_column, fee_type_name):
         """Create time series chart showing fees over time for each EGS in selected EDC"""
@@ -252,12 +256,32 @@ class FeesModule:
             height=500
         )
         
-        st.altair_chart(chart)
+        # Create volume chart (count of offers over time)
+        volume_data = fee_data.groupby('date').size().reset_index(name='count')
+        
+        volume_chart = alt.Chart(volume_data).mark_area(
+            color='lightblue',
+            opacity=0.3
+        ).encode(
+            x=alt.X('date:T', title='Date'),
+            y=alt.Y('count:Q', title='Number of Offers')
+        ).properties(
+            title=f"Volume of {fee_type_name} Offers Over Time",
+            height=150
+        )
+        
+        # Combine main chart and volume chart
+        combined_chart = alt.vconcat(
+            chart,
+            volume_chart
+        ).resolve_scale(x='shared')
+        
+        st.altair_chart(combined_chart)
     
     def render(self):
         """Main render function for fees module"""
-        st.header("EGS Fees Analysis")
-        st.write("Analyze signup, monthly, and termination fees by EDC and EGS supplier")
+        st.header("EGS Fees Analysis - PPL Electric Utilities")
+        st.write("Analyze signup, monthly, and termination fees for PPL Electric Utilities (2015 onwards)")
         
         # Create fee type selector
         fee_column, fee_type_name = self.create_fee_type_selector()
@@ -266,15 +290,11 @@ class FeesModule:
         fees_data = self.get_fees_data()
         
         if fees_data.empty:
-            st.error("No fees data available. Please check your database connection.")
+            st.error("No fees data available for PPL Electric Utilities. Please check your database connection.")
             return
         
-        # Create EDC selector
-        selected_edc = self.create_edc_selector(fees_data)
-        
-        if not selected_edc:
-            st.info("Please select an EDC to begin analysis.")
-            return
+        # Set selected EDC to PPL (no selector needed)
+        selected_edc = "PPL Electric Utilities"
         
         # Create time series chart first
         st.subheader(f"{fee_type_name} Over Time - {selected_edc}")
@@ -289,8 +309,8 @@ class FeesModule:
             st.metric("Total Records", total_records)
         
         with col2:
-            edc_records = len(fees_data[fees_data['edc'] == selected_edc])
-            st.metric(f"Records for {selected_edc}", edc_records)
+            unique_egs = fees_data['egs'].nunique()
+            st.metric("Unique EGS Suppliers", unique_egs)
         
         with col3:
             fee_records = len(fees_data[fees_data[fee_column].notna()])
@@ -298,9 +318,9 @@ class FeesModule:
         
         # Show sample data
         if not fees_data.empty:
-            sample_data = fees_data[fees_data['edc'] == selected_edc][['date', 'egs', fee_column]].head(10)
+            sample_data = fees_data[['date', 'egs', fee_column]].head(10)
             st.write("Sample data:")
-            st.dataframe(sample_data, width='stretch')
+            st.dataframe(sample_data, use_container_width=True)
         
         # Calculate statistics for selected EDC
         stats = self.calculate_fees_statistics(fees_data, selected_edc, fee_column)
@@ -323,6 +343,6 @@ class FeesModule:
         
         with col2:
             st.info("**Analysis Period:**")
-            st.write("- All available data")
-            st.write("- Filtered for valid fees ($0-$500)")
-            st.write("- Data cleaned for outliers")
+            st.write("- Data from 2015 onwards")
+            st.write("- PPL Electric Utilities only")
+            st.write("- Monthly fees converted from cents to dollars")

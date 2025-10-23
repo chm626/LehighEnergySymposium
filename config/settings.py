@@ -27,6 +27,12 @@ class Settings:
     # Available modules
     AVAILABLE_MODULES = [
         {
+            'name': 'Home',
+            'module': 'landing_module',
+            'class': 'LandingModule',
+            'description': 'Overview of ERES Energy Analytics platform and data sources'
+        },
+        {
             'name': 'PJM LMP Analysis',
             'module': 'pjm_module',
             'class': 'PJMModule',
@@ -39,7 +45,7 @@ class Settings:
             'description': 'Compare EGS retail prices to PJM wholesale prices by EDC'
         },
         {
-            'name': 'PTC Analysis',
+            'name': 'PTC, EGS, PJM Comparison',
             'module': 'ptc_module',
             'class': 'PTCModule',
             'description': 'Compare PTC rates to EGS retail prices and PJM wholesale prices by EDC'
@@ -51,7 +57,7 @@ class Settings:
             'description': 'Analyze EGS signup fees by EDC and supplier'
         },
         {
-            'name': 'EGS vs PTC Comparison',
+            'name': 'EGS Plans vs PTC',
             'module': 'egs_vs_ptc_module',
             'class': 'EGSvsPTCModule',
             'description': 'Compare individual EGS offers to PTC rates to identify above/below PTC offers'

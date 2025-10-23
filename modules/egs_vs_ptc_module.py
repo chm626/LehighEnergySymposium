@@ -49,7 +49,11 @@ class EGSvsPTCModule:
         if raw_egs.empty:
             return pd.DataFrame()
         
-        edc_data = raw_egs[raw_egs['edc'] == edc].copy()
+        # Filter by EDC and date (2016 onwards)
+        edc_data = raw_egs[
+            (raw_egs['edc'] == edc) & 
+            (raw_egs['date'] >= pd.Timestamp('2016-01-01'))
+        ].copy()
         if edc_data.empty:
             return pd.DataFrame()
         
@@ -95,89 +99,41 @@ class EGSvsPTCModule:
         return merged_data[['date', 'edc', 'egs', 'rate', 'ptc_rate', 'relative_rate', 'category', 'source']]
     
     def create_aggregate_chart(self, relative_data, edc, conform_egs):
-        """Create aggregate chart showing offers above and below PTC"""
+        """Create aggregate chart showing percentage of offers above and below PTC"""
         if relative_data.empty:
             st.warning(f"No data available for {edc}")
             return
         
-        # Group by date and category to get counts
-        aggregate_data = relative_data.groupby(['date', 'category']).agg({
-            'relative_rate': ['count', 'mean', 'min', 'max']
-        }).reset_index()
+        # Group by date to calculate percentages
+        monthly_totals = relative_data.groupby('date').size().reset_index(name='total_offers')
+        monthly_categories = relative_data.groupby(['date', 'category']).size().reset_index(name='category_count')
         
-        # Flatten column names
-        aggregate_data.columns = ['date', 'category', 'count', 'avg_relative', 'min_relative', 'max_relative']
+        # Merge to calculate percentages
+        monthly_percentages = pd.merge(monthly_categories, monthly_totals, on='date')
+        monthly_percentages['percentage'] = (monthly_percentages['category_count'] / monthly_percentages['total_offers'] * 100).round(2)
         
-        # Create the chart
-        base = alt.Chart(aggregate_data).encode(
+        # Create the percentage chart (volume bars removed due to scaling issues)
+        percentage_chart = alt.Chart(monthly_percentages).mark_line(point=True, strokeWidth=3).encode(
             x=alt.X('date:T', title='Date'),
-            y=alt.Y('avg_relative:Q', title='Average Rate Relative to PTC (¢/kWh)'),
-            color=alt.Color('category:N', 
-                           scale=alt.Scale(domain=['Below PTC', 'Above PTC'], 
-                                         range=['#2E8B57', '#DC143C']),
-                           title='Offer Category')
-        )
-        
-        # Create lines for each category
-        lines = base.mark_line(strokeWidth=3).encode(
-            opacity=alt.condition(alt.datum.category == 'Below PTC', alt.value(0.8), alt.value(0.8))
-        )
-        
-        # Add points for data visibility
-        points = base.mark_circle(size=60).encode(
-            opacity=alt.condition(alt.datum.category == 'Below PTC', alt.value(0.6), alt.value(0.6))
-        )
-        
-        chart = (lines + points).resolve_scale(color='independent')
-        
-        # Add zero line
-        zero_line = alt.Chart(pd.DataFrame({'y': [0]})).mark_rule(
-            color='black', strokeDash=[5, 5], strokeWidth=2
-        ).encode(y='y:Q')
-        
-        final_chart = (chart + zero_line).resolve_scale(y='independent')
-        
-        # Configure chart
-        final_chart = final_chart.properties(
-            height=500,
-            title=f"EGS Offers Relative to PTC - {edc}" + (" (Conformed)" if conform_egs else "")
-        ).interactive()
-        
-        st.altair_chart(final_chart, use_container_width=True)
-    
-    def create_individual_offers_chart(self, relative_data, edc, conform_egs):
-        """Create chart showing individual EGS offers"""
-        if relative_data.empty:
-            st.warning(f"No individual offers data available for {edc}")
-            return
-        
-        # Create the chart with points for individual offers
-        points = alt.Chart(relative_data).mark_circle(size=40).encode(
-            x=alt.X('date:T', title='Date'),
-            y=alt.Y('relative_rate:Q', title='Rate Relative to PTC (¢/kWh)'),
+            y=alt.Y('percentage:Q', title='Percentage of Offers (%)'),
             color=alt.Color('category:N', 
                            scale=alt.Scale(domain=['Below PTC', 'Above PTC'], 
                                          range=['#2E8B57', '#DC143C']),
                            title='Offer Category'),
-            tooltip=['egs:N', 'rate:Q', 'ptc_rate:Q', 'relative_rate:Q', 'source:N'],
-            opacity=alt.value(0.7)
-        )
-        
-        # Add zero line
-        zero_line = alt.Chart(pd.DataFrame({'y': [0]})).mark_rule(
-            color='black', strokeDash=[5, 5], strokeWidth=2
-        ).encode(y='y:Q')
-        
-        # Combine charts
-        final_chart = (points + zero_line).resolve_scale(y='independent')
-        
-        # Configure chart
-        final_chart = final_chart.properties(
+            tooltip=['date:T', 'category:N', 'percentage:Q', 'category_count:Q', 'total_offers:Q']
+        ).properties(
             height=500,
-            title=f"Individual EGS Offers Relative to PTC - {edc}" + (" (Conformed)" if conform_egs else "")
+            title=f"Percentage of EGS Offers by Category - {edc}" + (" (Conformed)" if conform_egs else "")
         ).interactive()
         
-        st.altair_chart(final_chart, use_container_width=True)
+        st.altair_chart(percentage_chart, use_container_width=True)
+        
+        # Add legend explanation
+        st.info("""
+        **Chart Legend:**
+        - **Red Line**: Percentage of offers above PTC (higher rates)
+        - **Green Line**: Percentage of offers below PTC (lower rates/savings)
+        """)
     
     def create_edc_selector(self, data):
         """Create EDC selection interface with session state"""
@@ -216,18 +172,8 @@ class EGSvsPTCModule:
     
     def create_chart_type_selector(self):
         """Create chart type selector with session state"""
-        if 'egs_vs_ptc_chart_type' not in st.session_state:
-            st.session_state.egs_vs_ptc_chart_type = 'Aggregate'
-        
-        chart_type = st.selectbox(
-            "Chart Type",
-            ['Aggregate', 'Individual Offers'],
-            index=0 if st.session_state.egs_vs_ptc_chart_type == 'Aggregate' else 1,
-            help="Aggregate shows average offers by category, Individual shows all offers"
-        )
-        
-        st.session_state.egs_vs_ptc_chart_type = chart_type
-        return chart_type
+        # Chart type selector removed - only aggregate chart available
+        return 'Aggregate'
     
     def preload_data_for_edc(self, edc):
         """Preload both regular and conformed EGS data for seamless switching"""
@@ -243,57 +189,329 @@ class EGSvsPTCModule:
         
         return ptc_data, regular_egs, conformed_egs
     
-    def create_data_summary(self, relative_data, edc, conform_egs):
-        """Create summary statistics"""
-        if relative_data.empty:
+    def preload_all_data_combinations(self):
+        """Preload all data combinations for seamless checkbox switching"""
+        # Get all raw data
+        raw_egs = shared_data_manager.get_raw_egs_data()
+        raw_ptc = shared_data_manager.get_raw_ptc_data()
+        
+        if raw_egs.empty or raw_ptc.empty:
+            return None, None, None, None
+        
+        # Create monthly PTC rates for all EDCs - more efficient approach
+        ptc_records = []
+        for _, row in raw_ptc.iterrows():
+            start_date = row['start_date']
+            end_date = row['end_date']
+            rate = row['rate']
+            edc = row['edc']
+            
+            # Generate monthly dates between start and end
+            current_date = start_date.replace(day=1)
+            while current_date <= end_date:
+                ptc_records.append({
+                    'date': current_date,
+                    'edc': edc,
+                    'ptc_rate': rate
+                })
+                current_date = current_date + pd.DateOffset(months=1)
+        
+        ptc_df = pd.DataFrame(ptc_records)
+        
+        # Filter EGS data from 2016 onwards
+        raw_egs_2016 = raw_egs[raw_egs['date'] >= pd.Timestamp('2016-01-01')]
+        
+        # Apply conforming logic for conformed data
+        wattbuy_no_fees = (
+            ((raw_egs_2016['enrollment_fee'].isna()) | (raw_egs_2016['enrollment_fee'] == 0)) &
+            ((raw_egs_2016['monthly_charge'].isna()) | (raw_egs_2016['monthly_charge'] == 0)) &
+            ((raw_egs_2016['early_term_fee_min'].isna()) | (raw_egs_2016['early_term_fee_min'] == 0))
+        )
+        
+        ocap_no_fees = (raw_egs_2016['cancel_fee'].isna())
+        
+        conformed_egs = raw_egs_2016[
+            (raw_egs_2016['term'] == 12) &
+            (raw_egs_2016['rate_type'].str.lower().str.contains('fixed', na=False)) &
+            (
+                ((raw_egs_2016['source'] == 'WattBuy') & wattbuy_no_fees) |
+                ((raw_egs_2016['source'] == 'OCAP') & ocap_no_fees)
+            )
+        ]
+        
+        # Instead of merging everything upfront, return the raw data and do targeted merges
+        # This prevents the massive memory allocation issue
+        return raw_egs_2016, conformed_egs, ptc_df, None
+    
+    def create_dual_axis_chart(self, raw_egs, conformed_egs, ptc_df, conform_egs_state):
+        """Create dual-axis chart showing offer counts and percentages"""
+        st.subheader("Average Offer Counts and Percentages by Utility")
+        
+        # Use appropriate dataset based on conform state
+        if conform_egs_state:
+            egs_data = conformed_egs
+        else:
+            egs_data = raw_egs
+        
+        if egs_data.empty or ptc_df.empty:
+            st.warning("No data available for analysis")
             return
         
-        st.subheader(f"Data Summary - {edc}" + (" (Conformed)" if conform_egs else ""))
+        # Merge EGS and PTC data - targeted merge to avoid memory issues
+        merged_data = pd.merge(egs_data, ptc_df, on=['date', 'edc'], how='inner')
         
-        # Calculate summary statistics
-        below_ptc = relative_data[relative_data['category'] == 'Below PTC']
-        above_ptc = relative_data[relative_data['category'] == 'Above PTC']
+        if merged_data.empty:
+            st.warning("No overlapping data between EGS offers and PTC rates")
+            return
         
-        col1, col2, col3, col4 = st.columns(4)
+        # Calculate relative rates
+        merged_data['relative_rate'] = merged_data['rate'] - merged_data['ptc_rate']
+        
+        # Group by EDC and calculate statistics
+        edc_stats = merged_data.groupby('edc').agg({
+            'relative_rate': [
+                'count',  # total offers
+                lambda x: (x >= 0).sum(),  # offers above PTC
+                lambda x: (x < 0).sum()     # offers below PTC
+            ]
+        }).reset_index()
+        
+        # Flatten column names
+        edc_stats.columns = ['edc', 'total_offers', 'offers_above_ptc', 'offers_below_ptc']
+        
+        # Calculate percentages
+        edc_stats['pct_above'] = (edc_stats['offers_above_ptc'] / edc_stats['total_offers'] * 100).round(2)
+        edc_stats['pct_below'] = (edc_stats['offers_below_ptc'] / edc_stats['total_offers'] * 100).round(2)
+        
+        # Prepare data for dual-axis chart with normalization
+        chart_data = []
+        for _, row in edc_stats.iterrows():
+            chart_data.extend([
+                {
+                    'edc': row['edc'],
+                    'category': 'Above PTC',
+                    'count': row['offers_above_ptc'],  # Positive values
+                    'percentage': row['pct_above']
+                },
+                {
+                    'edc': row['edc'],
+                    'category': 'Below PTC',
+                    'count': -row['offers_below_ptc'],  # Negative values for normalization
+                    'percentage': row['pct_below']
+                }
+            ])
+        
+        df_chart = pd.DataFrame(chart_data)
+        
+        # Create separate datasets for bars and lines to avoid color conflicts
+        bars_data = df_chart.copy()
+        lines_data = df_chart.copy()
+        
+        # Add color columns to distinguish bars from lines
+        bars_data['chart_type'] = 'bars'
+        lines_data['chart_type'] = 'lines'
+        
+        # Create bars chart with fixed colors
+        bars = alt.Chart(bars_data).mark_bar().encode(
+            x=alt.X('edc:N', title='Utility', axis=alt.Axis(labelAngle=-45)),
+            y=alt.Y('count:Q', title='Number of Offers', axis=alt.Axis(orient='left')),
+            color=alt.condition(
+                alt.datum.category == 'Above PTC',
+                alt.value('#DC143C'),  # Red for above PTC
+                alt.value('#2E8B57')   # Green for below PTC
+            ),
+            tooltip=['edc:N', 'category:N', 'count:Q', 'percentage:Q']
+        )
+        
+        # Just show bars without percentage lines
+        chart = bars.configure_axis(
+            labelFontSize=10,
+            labelFontWeight='normal'
+        ).properties(
+            height=500,
+            title="Offer Counts by Utility" + (" (Conformed)" if conform_egs_state else "")
+        ).interactive()
+        
+        st.altair_chart(chart, use_container_width=True)
+        
+        # Add explanation
+        st.info("""
+        **Chart Explanation:**
+        - **Bars (Left Y-axis):** Show the number of offers above/below PTC for each utility
+        - **Lines (Right Y-axis):** Show the percentage of offers above/below PTC for each utility
+        - **Red:** Offers above PTC (higher rates) - bars extend upward from 0 line
+        - **Green:** Offers below PTC (lower rates/savings) - bars extend downward from 0 line
+        """)
+
+    def create_summary_table(self, raw_egs, conformed_egs, ptc_df, conform_egs_state):
+        """Create summary table showing offers above/below PTC by term length for all EDCs"""
+        st.subheader("Electric Utility Offers Compared to PTC (All Terms)")
+        
+        # Create term filter checkboxes with session state
+        st.write("**Filter by Term Length:**")
+        col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.metric("Total Offers", len(relative_data))
+            if 'egs_vs_ptc_term_12' not in st.session_state:
+                st.session_state.egs_vs_ptc_term_12 = True
+            show_12_month = st.checkbox("12 months", key="egs_vs_ptc_term_12")
         
         with col2:
-            st.metric("Below PTC", len(below_ptc), 
-                     f"{len(below_ptc)/len(relative_data)*100:.1f}%" if len(relative_data) > 0 else "0%")
+            if 'egs_vs_ptc_term_less_12' not in st.session_state:
+                st.session_state.egs_vs_ptc_term_less_12 = True
+            show_less_12 = st.checkbox("Less than 12 months", key="egs_vs_ptc_term_less_12")
         
         with col3:
-            st.metric("Above PTC", len(above_ptc),
-                     f"{len(above_ptc)/len(relative_data)*100:.1f}%" if len(relative_data) > 0 else "0%")
+            if 'egs_vs_ptc_term_more_12' not in st.session_state:
+                st.session_state.egs_vs_ptc_term_more_12 = True
+            show_more_12 = st.checkbox("More than 12 months", key="egs_vs_ptc_term_more_12")
         
-        with col4:
-            avg_relative = relative_data['relative_rate'].mean()
-            st.metric("Avg Relative Rate", f"{avg_relative:.2f} ¢/kWh")
+        # Use appropriate dataset based on conform state
+        if conform_egs_state:
+            egs_data = conformed_egs
+        else:
+            egs_data = raw_egs
         
-        # Show detailed statistics
-        if not relative_data.empty:
-            st.subheader("Detailed Statistics")
+        if egs_data.empty or ptc_df.empty:
+            st.warning("No data available for term analysis")
+            return
+        
+        # Merge EGS and PTC data - targeted merge to avoid memory issues
+        merged_data = pd.merge(egs_data, ptc_df, on=['date', 'edc'], how='inner')
+        
+        if merged_data.empty:
+            st.warning("No overlapping data between EGS offers and PTC rates")
+            return
+        
+        # Calculate relative rates
+        merged_data['relative_rate'] = merged_data['rate'] - merged_data['ptc_rate']
+        
+        # Categorize terms
+        def categorize_term(term):
+            if pd.isna(term):
+                return "Unknown"
+            elif term == 12:
+                return "12"
+            elif term < 12:
+                return "< 12"
+            else:
+                return "> 12"
+        
+        merged_data['term_category'] = merged_data['term'].apply(categorize_term)
+        
+        # Group by EDC and term category
+        summary_stats = merged_data.groupby(['edc', 'term_category']).agg({
+            'relative_rate': ['count', lambda x: (x < 0).sum(), lambda x: (x >= 0).sum()]
+        }).reset_index()
+        
+        # Flatten column names
+        summary_stats.columns = ['edc', 'term_category', 'total_offers', 'offers_below_ptc', 'offers_above_ptc']
+        
+        # Calculate percentages
+        summary_stats['pct_above'] = (summary_stats['offers_above_ptc'] / summary_stats['total_offers'] * 100).round(2)
+        summary_stats['pct_below'] = (summary_stats['offers_below_ptc'] / summary_stats['total_offers'] * 100).round(2)
+        
+        # Filter based on checkboxes
+        term_filters = []
+        if show_12_month:
+            term_filters.append("12")
+        if show_less_12:
+            term_filters.append("< 12")
+        if show_more_12:
+            term_filters.append("> 12")
+        
+        if not term_filters:
+            st.warning("Please select at least one term length to display")
+            return
+        
+        filtered_stats = summary_stats[summary_stats['term_category'].isin(term_filters)]
+        
+        if filtered_stats.empty:
+            st.warning("No data available for selected term lengths")
+            return
+        
+        # Create the table
+        table_data = []
+        for edc in sorted(filtered_stats['edc'].unique()):
+            edc_data = filtered_stats[filtered_stats['edc'] == edc]
             
-            stats_col1, stats_col2 = st.columns(2)
+            for _, row in edc_data.iterrows():
+                table_data.append({
+                    'Utility Name': edc,
+                    'Term (months)': row['term_category'],
+                    'Offers Below PTC': f"{row['offers_below_ptc']:,}",
+                    'Offers Above PTC': f"{row['offers_above_ptc']:,}",
+                    'Total Offers': f"{row['total_offers']:,}",
+                    '% Above': f"{row['pct_above']:.2f}%",
+                    '% Below': f"{row['pct_below']:.2f}%"
+                })
+        
+        # Display the table
+        if table_data:
+            df_table = pd.DataFrame(table_data)
+            st.dataframe(df_table, use_container_width=True, hide_index=True)
             
-            with stats_col1:
-                st.write("**Below PTC Offers:**")
-                if not below_ptc.empty:
-                    st.write(f"- Count: {len(below_ptc)}")
-                    st.write(f"- Average: {below_ptc['relative_rate'].mean():.2f} ¢/kWh")
-                    st.write(f"- Range: {below_ptc['relative_rate'].min():.2f} to {below_ptc['relative_rate'].max():.2f} ¢/kWh")
-                else:
-                    st.write("- No offers below PTC")
-            
-            with stats_col2:
-                st.write("**Above PTC Offers:**")
-                if not above_ptc.empty:
-                    st.write(f"- Count: {len(above_ptc)}")
-                    st.write(f"- Average: {above_ptc['relative_rate'].mean():.2f} ¢/kWh")
-                    st.write(f"- Range: {above_ptc['relative_rate'].min():.2f} to {above_ptc['relative_rate'].max():.2f} ¢/kWh")
-                else:
-                    st.write("- No offers above PTC")
+            # Add note about conformed data
+            if conform_egs_state:
+                st.info("**Note:** Data shown reflects conformed EGS offers (12-month terms, fixed rates, no fees)")
+            else:
+                st.info("**Note:** Data includes all EGS offers regardless of term length, rate type, or fees")
+        
+        # Add summary statistics by term length
+        self.create_summary_statistics(merged_data, conform_egs_state)
+    
+    def create_summary_statistics(self, merged_data, conform_egs_state):
+        """Create summary statistics table showing averages by term length"""
+        if merged_data.empty:
+            return
+        
+        st.subheader("Summary Statistics by Term Length")
+        
+        # Calculate statistics by term category
+        summary_stats = merged_data.groupby('term_category').agg({
+            'relative_rate': ['count', 'mean', 'median', 'std'],
+            'rate': ['mean', 'median'],
+            'ptc_rate': ['mean', 'median']
+        }).round(3)
+        
+        # Flatten column names
+        summary_stats.columns = [
+            'Total Offers', 'Avg Relative Rate', 'Median Relative Rate', 'Std Dev Relative Rate',
+            'Avg EGS Rate', 'Median EGS Rate', 'Avg PTC Rate', 'Median PTC Rate'
+        ]
+        
+        # Calculate percentage above/below PTC
+        percentage_stats = merged_data.groupby('term_category').agg({
+            'relative_rate': lambda x: (x >= 0).sum() / len(x) * 100
+        }).round(2)
+        percentage_stats.columns = ['% Above PTC']
+        percentage_stats['% Below PTC'] = 100 - percentage_stats['% Above PTC']
+        
+        # Combine statistics
+        final_stats = pd.concat([summary_stats, percentage_stats], axis=1)
+        
+        # Format the display
+        display_stats = final_stats.copy()
+        display_stats['Avg Relative Rate'] = display_stats['Avg Relative Rate'].apply(lambda x: f"{x:.3f} ¢/kWh")
+        display_stats['Median Relative Rate'] = display_stats['Median Relative Rate'].apply(lambda x: f"{x:.3f} ¢/kWh")
+        display_stats['Std Dev Relative Rate'] = display_stats['Std Dev Relative Rate'].apply(lambda x: f"{x:.3f} ¢/kWh")
+        display_stats['Avg EGS Rate'] = display_stats['Avg EGS Rate'].apply(lambda x: f"{x:.3f} ¢/kWh")
+        display_stats['Median EGS Rate'] = display_stats['Median EGS Rate'].apply(lambda x: f"{x:.3f} ¢/kWh")
+        display_stats['Avg PTC Rate'] = display_stats['Avg PTC Rate'].apply(lambda x: f"{x:.3f} ¢/kWh")
+        display_stats['Median PTC Rate'] = display_stats['Median PTC Rate'].apply(lambda x: f"{x:.3f} ¢/kWh")
+        display_stats['% Above PTC'] = display_stats['% Above PTC'].apply(lambda x: f"{x:.1f}%")
+        display_stats['% Below PTC'] = display_stats['% Below PTC'].apply(lambda x: f"{x:.1f}%")
+        
+        # Display the table
+        st.dataframe(display_stats, use_container_width=True)
+        
+        # Add interpretation note
+        st.info("""
+        **Statistics Interpretation:**
+        - **Relative Rate**: EGS rate minus PTC rate (positive = above PTC, negative = below PTC)
+        - **Std Dev**: Standard deviation shows variability in relative rates
+        - **% Above/Below PTC**: Percentage of offers above or below the PTC benchmark
+        """)
     
     def render(self):
         """Render the EGS vs PTC comparison module"""
@@ -314,7 +532,14 @@ class EGSvsPTCModule:
             st.info("Please select an EDC to begin analysis.")
             return
         
-        # Preload all data for the selected EDC
+        # Preload all data combinations for seamless switching
+        raw_egs, conformed_egs, ptc_df, _ = self.preload_all_data_combinations()
+        
+        if raw_egs is None:
+            st.error("Failed to load data")
+            return
+        
+        # Preload individual EDC data for charts
         ptc_data, regular_egs_data, conformed_egs_data = self.preload_data_for_edc(selected_edc)
         
         if ptc_data.empty:
@@ -322,13 +547,7 @@ class EGSvsPTCModule:
             return
         
         # Create controls
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            conform_egs = self.create_conform_checkbox()
-        
-        with col2:
-            chart_type = self.create_chart_type_selector()
+        conform_egs = self.create_conform_checkbox()
         
         # Switch between preloaded datasets based on checkbox state
         if conform_egs:
@@ -340,21 +559,21 @@ class EGSvsPTCModule:
             st.warning(f"No EGS data available for {selected_edc}")
             return
         
-        # Calculate relative rates
+        # Calculate relative rates for individual EDC charts
         relative_data = self.calculate_relative_rates(egs_data, ptc_data)
         
         if relative_data.empty:
             st.warning(f"No overlapping data between EGS offers and PTC rates for {selected_edc}")
             return
         
-        # Create data summary
-        self.create_data_summary(relative_data, selected_edc, conform_egs)
+        # Create aggregate chart
+        self.create_aggregate_chart(relative_data, selected_edc, conform_egs)
         
-        # Create charts based on selected type
-        if chart_type == 'Aggregate':
-            self.create_aggregate_chart(relative_data, selected_edc, conform_egs)
-        else:
-            self.create_individual_offers_chart(relative_data, selected_edc, conform_egs)
+        # Create dual-axis chart using preloaded data
+        self.create_dual_axis_chart(raw_egs, conformed_egs, ptc_df, conform_egs)
+        
+        # Create summary table using preloaded data
+        self.create_summary_table(raw_egs, conformed_egs, ptc_df, conform_egs)
         
         # Show data source information
         st.subheader("Data Sources")
