@@ -17,7 +17,7 @@ class Settings:
     }
     
     # Application settings
-    APP_TITLE = "Symposium Energy Analytics"
+    APP_TITLE = "ERES Energy Analytics"
     APP_DESCRIPTION = "Comprehensive energy market analysis platform"
     
     # Chart settings
