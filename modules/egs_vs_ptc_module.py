@@ -107,33 +107,129 @@ class EGSvsPTCModule:
         # Group by date to calculate percentages
         monthly_totals = relative_data.groupby('date').size().reset_index(name='total_offers')
         monthly_categories = relative_data.groupby(['date', 'category']).size().reset_index(name='category_count')
-        
+
         # Merge to calculate percentages
         monthly_percentages = pd.merge(monthly_categories, monthly_totals, on='date')
         monthly_percentages['percentage'] = (monthly_percentages['category_count'] / monthly_percentages['total_offers'] * 100).round(2)
-        
-        # Create the percentage chart (volume bars removed due to scaling issues)
-        percentage_chart = alt.Chart(monthly_percentages).mark_line(point=True, strokeWidth=3).encode(
+
+        # Keep only "Below PTC" series for a single green line
+        below_df = monthly_percentages[monthly_percentages['category'] == 'Below PTC'].copy()
+
+        # Single-line percentage chart for Below PTC
+        percentage_chart = alt.Chart(below_df).mark_line(point=False, strokeWidth=3, color='#2E8B57').encode(
             x=alt.X('date:T', title='Date'),
-            y=alt.Y('percentage:Q', title='Percentage of Offers (%)'),
-            color=alt.Color('category:N', 
-                           scale=alt.Scale(domain=['Below PTC', 'Above PTC'], 
-                                         range=['#2E8B57', '#DC143C']),
-                           title='Offer Category'),
-            tooltip=['date:T', 'category:N', 'percentage:Q', 'category_count:Q', 'total_offers:Q']
+            y=alt.Y('percentage:Q', title='Offers Below PTC (%)'),
+            tooltip=['date:T', 'percentage:Q', 'category_count:Q', 'total_offers:Q']
         ).properties(
             height=500,
-            title=f"Percentage of EGS Offers by Category - {edc}" + (" (Conformed)" if conform_egs else "")
+            title=f"Percentage of EGS Offers Below PTC - {edc}" + (" (Conformed)" if conform_egs else "")
         ).interactive()
-        
+
         st.altair_chart(percentage_chart, use_container_width=True)
         
-        # Add legend explanation
+        # Add explanation
         st.info("""
-        **Chart Legend:**
-        - **Red Line**: Percentage of offers above PTC (higher rates)
-        - **Green Line**: Percentage of offers below PTC (lower rates/savings)
+        **Chart Explanation:**
+        - **Green Line**: Percentage of offers priced below the PTC benchmark (potential savings)
         """)
+
+    def get_pjm_data_for_edc(self, edc):
+        """Get PJM monthly data for a specific EDC from shared cache if available."""
+        try:
+            # Reuse shared data manager method used elsewhere
+            if hasattr(shared_data_manager, 'get_pjm_data_for_module'):
+                return shared_data_manager.get_pjm_data_for_module(edc=edc)
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+    def create_price_over_time_tabs(self, ptc_data, egs_data, selected_edc, conform_egs):
+        """Create mean/median price-over-time charts for PTC, EGS and PJM."""
+        st.subheader("Price Over Time (Mean vs Median)")
+
+        # Prepare PTC monthly series (mean/median are identical per month after collapse)
+        ptc_series = pd.DataFrame()
+        if not ptc_data.empty:
+            ptc_series = ptc_data.groupby('date')['ptc_rate'].mean().reset_index()
+            ptc_series['PTC_mean'] = ptc_series['ptc_rate']
+            ptc_series['PTC_median'] = ptc_data.groupby('date')['ptc_rate'].median().values
+
+        # Prepare EGS series (filter selected edc, compute mean/median)
+        egs_series_mean = pd.DataFrame()
+        egs_series_median = pd.DataFrame()
+        if not egs_data.empty:
+            egs_filtered = egs_data[egs_data['edc'] == selected_edc]
+            if not egs_filtered.empty:
+                egs_series_mean = egs_filtered.groupby('date')['rate'].mean().reset_index().rename(columns={'rate': 'EGS'})
+                egs_series_median = egs_filtered.groupby('date')['rate'].median().reset_index().rename(columns={'rate': 'EGS'})
+
+        # Prepare PJM series (optional)
+        pjm_data = self.get_pjm_data_for_edc(selected_edc)
+        pjm_series_mean = pd.DataFrame()
+        pjm_series_median = pd.DataFrame()
+        if not pjm_data.empty:
+            pjm_series_mean = pjm_data.groupby('date')['lmp_cents_per_kwh'].mean().reset_index().rename(columns={'lmp_cents_per_kwh': 'PJM'})
+            pjm_series_median = pjm_data.groupby('date')['lmp_cents_per_kwh'].median().reset_index().rename(columns={'lmp_cents_per_kwh': 'PJM'})
+
+        # Build mean and median chart datasets in long form
+        def build_long(df_list, labels):
+            frames = []
+            for df, label in zip(df_list, labels):
+                if df is not None and not df.empty:
+                    tmp = df.copy()
+                    if label == 'PTC_mean' or label == 'PTC_median':
+                        # PTC series has columns: date, PTC_mean/PTC_median
+                        value_col = label
+                        tmp = tmp[['date', value_col]].rename(columns={value_col: 'price'})
+                        tmp['type'] = 'PTC'
+                    else:
+                        # Generic series has columns: date, <label> where label is 'EGS' or 'PJM'
+                        tmp = tmp[['date', label]].rename(columns={label: 'price'})
+                        tmp['type'] = label
+                    frames.append(tmp)
+            if frames:
+                return pd.concat(frames, ignore_index=True)
+            return pd.DataFrame()
+
+        mean_long = build_long(
+            [ptc_series[['date', 'PTC_mean']] if not ptc_series.empty else None,
+             egs_series_mean.rename(columns={'EGS': 'EGS'}) if not egs_series_mean.empty else None,
+             pjm_series_mean.rename(columns={'PJM': 'PJM'}) if not pjm_series_mean.empty else None],
+            ['PTC_mean', 'EGS', 'PJM']
+        )
+        median_long = build_long(
+            [ptc_series[['date', 'PTC_median']] if not ptc_series.empty else None,
+             egs_series_median.rename(columns={'EGS': 'EGS'}) if not egs_series_median.empty else None,
+             pjm_series_median.rename(columns={'PJM': 'PJM'}) if not pjm_series_median.empty else None],
+            ['PTC_median', 'EGS', 'PJM']
+        )
+
+        tab_mean, tab_median = st.tabs(["Average (Mean)", "Median"])
+        import altair as alt
+
+        def render_chart(df, title_suffix):
+            if df.empty:
+                st.info(f"No {title_suffix.lower()} data available.")
+                return
+            min_price = df['price'].min()
+            max_price = df['price'].max()
+            y_min = max(0, min_price * 0.9)
+            y_max = max_price * 1.1
+            chart = alt.Chart(df).mark_line().encode(
+                x=alt.X('date:T', title='Date'),
+                y=alt.Y('price:Q', title='Price (¢/kWh)', scale=alt.Scale(domain=[y_min, y_max])),
+                color=alt.Color('type:N', scale=alt.Scale(domain=['PTC', 'EGS', 'PJM'], range=['#FF6B6B', '#4ECDC4', '#45B7D1'])),
+                tooltip=['date:T', 'type:N', alt.Tooltip('price:Q', format='.2f')]
+            ).properties(
+                height=500,
+                title=f"PTC vs EGS{' vs PJM' if 'PJM' in df['type'].unique() else ''} ({title_suffix}) - {selected_edc}" + (" (Conformed)" if conform_egs else "")
+            )
+            st.altair_chart(chart, use_container_width=True)
+
+        with tab_mean:
+            render_chart(mean_long, 'Mean')
+        with tab_median:
+            render_chart(median_long, 'Median')
     
     def create_edc_selector(self, data):
         """Create EDC selection interface with session state"""
@@ -574,6 +670,9 @@ class EGSvsPTCModule:
         
         # Create summary table using preloaded data
         self.create_summary_table(raw_egs, conformed_egs, ptc_df, conform_egs)
+
+        # Create price-over-time mean/median tabs
+        self.create_price_over_time_tabs(ptc_data, egs_data, selected_edc, conform_egs)
         
         # Show data source information
         st.subheader("Data Sources")

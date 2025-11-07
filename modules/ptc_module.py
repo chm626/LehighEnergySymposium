@@ -47,14 +47,15 @@ class PTCModule:
         return shared_data_manager.get_pjm_data_for_module(edc=edc)
     
     def get_all_edcs_average_data(self):
-        """Get averaged data across all EDCs for the overview chart"""
+        """Get averaged data across all EDCs for the overview chart (mean and median)."""
         try:
             # Get all data from shared cache
             all_ptc_data = shared_data_manager.get_raw_ptc_data()
             all_egs_data = shared_data_manager.get_raw_egs_data()
             all_pjm_data = shared_data_manager.get_raw_pjm_data()
             
-            chart_data_list = []
+            chart_data_list_mean = []
+            chart_data_list_median = []
             
             # Process PTC data - create monthly averages across all EDCs
             if not all_ptc_data.empty:
@@ -67,35 +68,54 @@ class PTCModule:
                         ptc_monthly.append({
                             'date': current_date.replace(day=1),
                             'price': row['rate'],
-                            'type': 'PTC Average'
+                            'type': 'PTC',
+                            'records_used': 1  # one PTC period record contributes to this month
                         })
                         # Use pandas date arithmetic to avoid day-of-month issues
                         current_date = current_date + pd.DateOffset(months=1)
                 
                 if ptc_monthly:
                     ptc_df = pd.DataFrame(ptc_monthly)
-                    ptc_average = ptc_df.groupby('date')['price'].mean().reset_index()
-                    ptc_average['type'] = 'PTC Average'
-                    chart_data_list.append(ptc_average)
+                    grouped = ptc_df.groupby('date')
+                    ptc_mean = grouped['price'].mean().reset_index().rename(columns={'price': 'price_mean'})
+                    ptc_median = grouped['price'].median().reset_index().rename(columns={'price': 'price_median'})
+                    ptc_counts = grouped['records_used'].sum().reset_index().rename(columns={'records_used': 'records_used'})
+                    ptc_mean['type'] = 'PTC'
+                    ptc_median['type'] = 'PTC'
+                    ptc_mean = ptc_mean.merge(ptc_counts, on='date', how='left')
+                    ptc_median = ptc_median.merge(ptc_counts, on='date', how='left')
+                    chart_data_list_mean.append(ptc_mean)
+                    chart_data_list_median.append(ptc_median)
             
             # Process EGS data - average across all EDCs
             if not all_egs_data.empty:
-                egs_average = all_egs_data.groupby('date')['rate'].mean().reset_index()
-                egs_average['price'] = egs_average['rate']
-                egs_average['type'] = 'EGS Average'
-                chart_data_list.append(egs_average[['date', 'price', 'type']])
+                grouped = all_egs_data.groupby('date')
+                egs_mean = grouped['rate'].mean().reset_index().rename(columns={'rate': 'price_mean'})
+                egs_median = grouped['rate'].median().reset_index().rename(columns={'rate': 'price_median'})
+                egs_counts = grouped['rate'].size().reset_index().rename(columns={'rate': 'records_used'})
+                egs_mean['type'] = 'EGS'
+                egs_median['type'] = 'EGS'
+                egs_mean = egs_mean.merge(egs_counts, on='date', how='left')
+                egs_median = egs_median.merge(egs_counts, on='date', how='left')
+                chart_data_list_mean.append(egs_mean[['date', 'price_mean', 'type', 'records_used']])
+                chart_data_list_median.append(egs_median[['date', 'price_median', 'type', 'records_used']])
             
             # Process PJM data - average across all zones
             if not all_pjm_data.empty:
-                pjm_average = all_pjm_data.groupby('date')['lmp_cents_per_kwh'].mean().reset_index()
-                pjm_average['price'] = pjm_average['lmp_cents_per_kwh']
-                pjm_average['type'] = 'PJM Average'
-                chart_data_list.append(pjm_average[['date', 'price', 'type']])
+                grouped = all_pjm_data.groupby('date')
+                pjm_mean = grouped['lmp_cents_per_kwh'].mean().reset_index().rename(columns={'lmp_cents_per_kwh': 'price_mean'})
+                pjm_median = grouped['lmp_cents_per_kwh'].median().reset_index().rename(columns={'lmp_cents_per_kwh': 'price_median'})
+                pjm_counts = grouped.size().reset_index().rename(columns={0: 'records_used'})
+                pjm_mean['type'] = 'PJM'
+                pjm_median['type'] = 'PJM'
+                pjm_mean = pjm_mean.merge(pjm_counts, on='date', how='left')
+                pjm_median = pjm_median.merge(pjm_counts, on='date', how='left')
+                chart_data_list_mean.append(pjm_mean[['date', 'price_mean', 'type', 'records_used']])
+                chart_data_list_median.append(pjm_median[['date', 'price_median', 'type', 'records_used']])
             
-            if chart_data_list:
-                return pd.concat(chart_data_list, ignore_index=True)
-            else:
-                return pd.DataFrame()
+            mean_df = pd.concat(chart_data_list_mean, ignore_index=True) if chart_data_list_mean else pd.DataFrame()
+            median_df = pd.concat(chart_data_list_median, ignore_index=True) if chart_data_list_median else pd.DataFrame()
+            return mean_df, median_df
                 
         except Exception as e:
             st.error(f"Failed to create all-EDCs average data: {e}")
@@ -154,51 +174,66 @@ class PTCModule:
         return conform_egs
     
     def create_all_edcs_chart(self):
-        """Create chart showing averages across all EDCs"""
-        chart_data = self.get_all_edcs_average_data()
+        """Create charts showing averages (mean and median) across all EDCs."""
+        mean_df, median_df = self.get_all_edcs_average_data()
         
-        if chart_data.empty:
+        if mean_df.empty and median_df.empty:
             st.warning("No data available for all-EDCs average chart.")
             return
         
-        # Create chart with custom styling
         import altair as alt
         
-        # Calculate reasonable y-axis bounds
-        min_price = chart_data['price'].min()
-        max_price = chart_data['price'].max()
-        y_min = max(0, min_price * 0.9)
-        y_max = max_price * 1.1
+        tab_mean, tab_median = st.tabs(["Average (Mean)", "Median"])
         
-        # Create base chart
-        base = alt.Chart(chart_data).encode(
-            x=alt.X('date:T', title='Date'),
-            y=alt.Y('price:Q', title='Price (¢/kWh)', 
-                   scale=alt.Scale(domain=[y_min, y_max])),
-            color=alt.Color('type:N', 
-                          scale=alt.Scale(
-                              domain=['PTC Average', 'EGS Average', 'PJM Average'],
-                              range=['#FF6B6B', '#4ECDC4', '#45B7D1']
-                          ),
-                          sort=['PTC Average', 'EGS Average', 'PJM Average']
-            ),
-            strokeWidth=alt.condition(
-                alt.datum.type == 'PTC Average',
-                alt.value(2),  # Thicker line for PTC
-                alt.value(1)   # Normal thickness for others
-            )
-        )
+        with tab_mean:
+            chart_data = mean_df.rename(columns={'price_mean': 'price'})
+            if chart_data.empty:
+                st.info("No mean data available.")
+            else:
+                min_price = chart_data['price'].min()
+                max_price = chart_data['price'].max()
+                y_min = max(0, min_price * 0.9)
+                y_max = max_price * 1.1
+                base = alt.Chart(chart_data).encode(
+                    x=alt.X('date:T', title='Date'),
+                    y=alt.Y('price:Q', title='Price (¢/kWh)', scale=alt.Scale(domain=[y_min, y_max])),
+                    color=alt.Color('type:N', 
+                                    scale=alt.Scale(domain=['PTC', 'EGS', 'PJM'],
+                                                    range=['#FF6B6B', '#4ECDC4', '#45B7D1']),
+                                    sort=['PTC', 'EGS', 'PJM']),
+                    strokeWidth=alt.condition(alt.datum.type == 'PTC', alt.value(2), alt.value(1))
+                )
+                chart = base.mark_line().properties(
+                    title="PTC vs EGS vs PJM (Mean) - All EDCs",
+                    width='container',
+                    height=500
+                )
+                st.altair_chart(chart, use_container_width=True)
         
-        # Create line chart
-        chart = base.mark_line().add_selection(
-            alt.selection_interval()
-        ).properties(
-            title="PTC vs EGS vs PJM Pricing Comparison - All EDCs Average",
-            width='container',
-            height=500
-        )
-        
-        st.altair_chart(chart)
+        with tab_median:
+            chart_data = median_df.rename(columns={'price_median': 'price'})
+            if chart_data.empty:
+                st.info("No median data available.")
+            else:
+                min_price = chart_data['price'].min()
+                max_price = chart_data['price'].max()
+                y_min = max(0, min_price * 0.9)
+                y_max = max_price * 1.1
+                base = alt.Chart(chart_data).encode(
+                    x=alt.X('date:T', title='Date'),
+                    y=alt.Y('price:Q', title='Price (¢/kWh)', scale=alt.Scale(domain=[y_min, y_max])),
+                    color=alt.Color('type:N', 
+                                    scale=alt.Scale(domain=['PTC', 'EGS', 'PJM'],
+                                                    range=['#FF6B6B', '#4ECDC4', '#45B7D1']),
+                                    sort=['PTC', 'EGS', 'PJM']),
+                    strokeWidth=alt.condition(alt.datum.type == 'PTC', alt.value(2), alt.value(1))
+                )
+                chart = base.mark_line().properties(
+                    title="PTC vs EGS vs PJM (Median) - All EDCs",
+                    width='container',
+                    height=500
+                )
+                st.altair_chart(chart, use_container_width=True)
     
     def calculate_statistics(self, ptc_data, egs_data, pjm_data, selected_edc):
         """Calculate statistics for PTC, EGS, and PJM data"""
@@ -223,12 +258,13 @@ class PTCModule:
         if not egs_data.empty:
             egs_filtered = egs_data[egs_data['edc'] == selected_edc]
             if not egs_filtered.empty:
+                total_offers = int(egs_filtered['count_offers'].sum()) if 'count_offers' in egs_filtered.columns else len(egs_filtered)
                 stats['egs'] = {
                     'min_price': egs_filtered['avg_rate'].min(),
                     'max_price': egs_filtered['avg_rate'].max(),
                     'median_price': egs_filtered['avg_rate'].median(),
                     'average_price': egs_filtered['avg_rate'].mean(),
-                    'total_records': len(egs_filtered)
+                    'total_records': total_offers
                 }
         
         # PJM statistics
@@ -362,12 +398,13 @@ class PTCModule:
                 st.info("No PJM data available for this EDC.")
     
     def create_comparison_chart(self, ptc_data, egs_data, pjm_data, selected_edc, egs_label="EGS Average"):
-        """Create chart comparing PTC, EGS average, and PJM average"""
+        """Create charts comparing PTC, EGS, and PJM using mean and median for the EGS/PJM aggregates."""
         if ptc_data.empty and egs_data.empty and pjm_data.empty:
             st.warning("No data available to display.")
             return
         
-        chart_data_list = []
+        chart_data_list_mean = []
+        chart_data_list_median = []
         
         # Prepare PTC data for chart
         if not ptc_data.empty:
@@ -392,82 +429,79 @@ class PTCModule:
                 
                 if ptc_monthly:
                     ptc_chart_data = pd.DataFrame(ptc_monthly)
-                    # Average by month to avoid duplicate points
-                    ptc_chart_data = ptc_chart_data.groupby('date')['price'].mean().reset_index()
-                    ptc_chart_data['type'] = 'PTC'
-                    ptc_chart_data['line_width'] = 2
-                    ptc_chart_data['sort_order'] = 0
-                    chart_data_list.append(ptc_chart_data)
+                    # For PTC (single value per month), mean == median after monthly collapse
+                    ptc_mean = ptc_chart_data.groupby('date')['price'].mean().reset_index().rename(columns={'price':'price_mean'})
+                    ptc_median = ptc_chart_data.groupby('date')['price'].median().reset_index().rename(columns={'price':'price_median'})
+                    for df, lst in [(ptc_mean, chart_data_list_mean), (ptc_median, chart_data_list_median)]:
+                        df['type'] = 'PTC'
+                        df['line_width'] = 2
+                        df['sort_order'] = 0
+                        lst.append(df)
         
         # Prepare EGS data for chart
         if not egs_data.empty:
             egs_filtered = egs_data[egs_data['edc'] == selected_edc]
             if not egs_filtered.empty:
-                egs_chart_data = egs_filtered.groupby('date')['avg_rate'].mean().reset_index()
-                egs_chart_data['type'] = egs_label
-                egs_chart_data['price'] = egs_chart_data['avg_rate']
-                egs_chart_data['line_width'] = 1
-                egs_chart_data['sort_order'] = 1
-                chart_data_list.append(egs_chart_data[['date', 'price', 'type', 'line_width', 'sort_order']])
+                # EGS dataset may be pre-aggregated to avg_rate; compute mean and median across offers
+                egs_mean = egs_filtered.groupby('date')['avg_rate'].mean().reset_index().rename(columns={'avg_rate':'price_mean'})
+                egs_median = egs_filtered.groupby('date')['avg_rate'].median().reset_index().rename(columns={'avg_rate':'price_median'})
+                for df, lst in [(egs_mean, chart_data_list_mean), (egs_median, chart_data_list_median)]:
+                    df['type'] = egs_label
+                    df['line_width'] = 1
+                    df['sort_order'] = 1
+                    lst.append(df)
         
         # Prepare PJM data for chart
         if not pjm_data.empty:
-            pjm_chart_data = pjm_data[['date', 'lmp_cents_per_kwh']].copy()
-            pjm_chart_data['type'] = 'PJM Average'
-            pjm_chart_data['price'] = pjm_chart_data['lmp_cents_per_kwh']
-            pjm_chart_data['line_width'] = 1
-            pjm_chart_data['sort_order'] = 2
-            chart_data_list.append(pjm_chart_data[['date', 'price', 'type', 'line_width', 'sort_order']])
+            # If pjm_data has multiple records per month, compute mean and median; otherwise both identical
+            pjm_mean = pjm_data.groupby('date')['lmp_cents_per_kwh'].mean().reset_index().rename(columns={'lmp_cents_per_kwh':'price_mean'})
+            pjm_median = pjm_data.groupby('date')['lmp_cents_per_kwh'].median().reset_index().rename(columns={'lmp_cents_per_kwh':'price_median'})
+            for df, lst in [(pjm_mean, chart_data_list_mean), (pjm_median, chart_data_list_median)]:
+                df['type'] = 'PJM'
+                df['line_width'] = 1
+                df['sort_order'] = 2
+                lst.append(df)
         
-        if not chart_data_list:
+        if not chart_data_list_mean and not chart_data_list_median:
             st.warning("No data available for the selected EDC.")
             return
         
-        # Combine all data
-        chart_data = pd.concat(chart_data_list, ignore_index=True)
-        
-        # Sort data to ensure proper legend order
-        chart_data = chart_data.sort_values(['sort_order', 'date'])
-        
-        # Create chart with custom styling
         import altair as alt
         
-        # Calculate reasonable y-axis bounds
-        min_price = chart_data['price'].min()
-        max_price = chart_data['price'].max()
-        # Add some padding (10% on each side) but ensure minimum is at least 0
-        y_min = max(0, min_price * 0.9)
-        y_max = max_price * 1.1
+        tab_mean, tab_median = st.tabs(["Average (Mean)", "Median"])
         
-        # Create base chart
-        base = alt.Chart(chart_data).encode(
-            x=alt.X('date:T', title='Date'),
-            y=alt.Y('price:Q', title='Price (¢/kWh)', 
-                   scale=alt.Scale(domain=[y_min, y_max])),
-            color=alt.Color('type:N', 
-                          scale=alt.Scale(
-                              domain=['PTC', egs_label, 'PJM Average'],
-                              range=['#FF6B6B', '#4ECDC4', '#45B7D1']
-                          ),
-                          sort=['PTC', egs_label, 'PJM Average']
-            ),
-            strokeWidth=alt.condition(
-                alt.datum.type == 'PTC',
-                alt.value(2),  # Thicker line for PTC
-                alt.value(1)   # Normal thickness for others
+        def render_chart(df, title_suffix):
+            if df.empty:
+                st.info(f"No {title_suffix.lower()} data available.")
+                return
+            df = df.sort_values(['sort_order', 'date'])
+            min_price = df.iloc[:, df.columns.get_loc('price_' + title_suffix.lower())].min()
+            max_price = df.iloc[:, df.columns.get_loc('price_' + title_suffix.lower())].max()
+            y_min = max(0, min_price * 0.9)
+            y_max = max_price * 1.1
+            chart_df = df.rename(columns={f'price_{title_suffix.lower()}': 'price'})
+            base = alt.Chart(chart_df).encode(
+                x=alt.X('date:T', title='Date'),
+                y=alt.Y('price:Q', title='Price (¢/kWh)', scale=alt.Scale(domain=[y_min, y_max])),
+                color=alt.Color('type:N', 
+                                scale=alt.Scale(domain=['PTC', egs_label, 'PJM'],
+                                                range=['#FF6B6B', '#4ECDC4', '#45B7D1']),
+                                sort=['PTC', egs_label, 'PJM']),
+                strokeWidth=alt.condition(alt.datum.type == 'PTC', alt.value(2), alt.value(1))
             )
-        )
+            chart = base.mark_line().properties(
+                title=f"PTC vs EGS vs PJM ({title_suffix}) - {selected_edc}",
+                width='container',
+                height=500
+            )
+            st.altair_chart(chart, use_container_width=True)
         
-        # Create line chart
-        chart = base.mark_line().add_selection(
-            alt.selection_interval()
-        ).properties(
-            title=f"PTC vs EGS vs PJM Pricing Comparison - {selected_edc}",
-            width='container',
-            height=500
-        )
-        
-        st.altair_chart(chart)
+        with tab_mean:
+            chart_data_mean = pd.concat(chart_data_list_mean, ignore_index=True) if chart_data_list_mean else pd.DataFrame()
+            render_chart(chart_data_mean, 'Mean')
+        with tab_median:
+            chart_data_median = pd.concat(chart_data_list_median, ignore_index=True) if chart_data_list_median else pd.DataFrame()
+            render_chart(chart_data_median, 'Median')
     
     def render(self):
         """Main render function for PTC module"""

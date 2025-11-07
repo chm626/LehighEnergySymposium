@@ -12,30 +12,42 @@ class PJMModule:
     
     @st.cache_data
     def get_pjm_data(_self):
-        """Get monthly averaged PJM data from database"""
+        """Load daily PJM LMP data and compute monthly mean and median per zone."""
         try:
             query = """
             SELECT 
-                YEAR(date) as year,
-                MONTH(date) as month,
+                date,
                 zone,
-                AVG(average_lmp) as average_lmp
-            FROM PJM_daily 
-            GROUP BY YEAR(date), MONTH(date), zone
-            ORDER BY year, month, zone
+                average_lmp
+            FROM PJM_daily
+            ORDER BY date, zone
             """
-            
             df = db_manager.execute_query(query)
-            
-            # Create date column from year and month, convert average_lmp to float
-            df['date'] = pd.to_datetime(df[['year', 'month']].assign(day=1))
+
+            if df.empty:
+                return pd.DataFrame()
+
+            # Ensure correct dtypes
+            df['date'] = pd.to_datetime(df['date'])
             df['average_lmp'] = df['average_lmp'].astype(float)
-            
-            # Convert from $/MWh to cents/kWh
-            df['lmp_cents_per_kwh'] = df['average_lmp'] * 0.1
-            
-            return df
-            
+
+            # Compute monthly aggregates (mean and median) per zone
+            df['month'] = df['date'].values.astype('datetime64[M]')
+            monthly = (
+                df.groupby(['month', 'zone'])['average_lmp']
+                .agg(mean='mean', median='median', records_used='size')
+                .reset_index()
+            )
+
+            # Convert $/MWh to ¢/kWh
+            monthly['lmp_mean_c_per_kwh'] = monthly['mean'] * 0.1
+            monthly['lmp_median_c_per_kwh'] = monthly['median'] * 0.1
+
+            # Standardize date column name used by charts
+            monthly = monthly.rename(columns={'month': 'date'})
+
+            return monthly
+
         except Exception as e:
             st.error(f"Failed to load PJM data: {e}")
             return pd.DataFrame()
@@ -72,8 +84,8 @@ class PJMModule:
         
         return selected_zones
     
-    def create_data_summary(self, data, selected_zones):
-        """Create PJM-specific data summary"""
+    def create_data_summary(self, data, selected_zones, measure: str):
+        """Create PJM-specific data summary for selected measure (mean|median)."""
         if data.empty:
             return
         
@@ -89,43 +101,57 @@ class PJMModule:
                 'width': 2
             },
             {
+                'label': 'Underlying Records Used',
+                'value': lambda df: int(df['records_used'].sum()) if 'records_used' in df.columns else len(df),
+                'width': 1.5
+            },
+            {
                 'label': 'Zones Displayed',
                 'value': lambda df: len(selected_zones),
                 'width': 1
             },
             {
-                'label': 'Overall Avg LMP',
-                'value': lambda df: f"{df['lmp_cents_per_kwh'].mean():.2f} ¢/kWh",
+                'label': 'Overall LMP (selected)',
+                'value': (lambda df: f"{df['lmp_mean_c_per_kwh'].mean():.2f} ¢/kWh") if measure == 'mean' else (lambda df: f"{df['lmp_median_c_per_kwh'].median():.2f} ¢/kWh"),
                 'width': 1.5
             }
         ]
         
         DataSummary.create_summary_metrics(data, metrics_config)
     
-    def create_chart(self, data):
-        """Create PJM LMP chart"""
+    def create_chart(self, data, measure: str):
+        """Create PJM LMP chart for the selected measure (mean|median)."""
         if data.empty:
             st.warning("No data available to display.")
             return
-        
+
+        if measure == 'mean':
+            y_col = 'lmp_mean_c_per_kwh'
+            title = 'PJM Monthly Average (Mean) LMP by Zone'
+            y_title = 'Mean LMP (¢/kWh)'
+        else:
+            y_col = 'lmp_median_c_per_kwh'
+            title = 'PJM Monthly Median LMP by Zone'
+            y_title = 'Median LMP (¢/kWh)'
+
         chart = ChartBuilder.create_line_chart(
             data=data,
             x_col="date",
-            y_col="lmp_cents_per_kwh",
+            y_col=y_col,
             color_col="zone",
-            title="PJM Monthly Average LMP by Zone",
+            title=title,
             x_title="Date",
-            y_title="Average LMP (¢/kWh)"
+            y_title=y_title
         )
-        
-        st.altair_chart(chart)
+
+        st.altair_chart(chart, use_container_width=True)
     
     def render(self):
         """Main render function for PJM module"""
         st.header("PJM LMP Analysis")
         st.write("Analyze PJM Locational Marginal Prices by zone over time")
         
-        # Get data
+        # Get data (monthly mean and median per zone)
         data = self.get_pjm_data()
         
         if data.empty:
@@ -142,11 +168,20 @@ class PJMModule:
             st.warning("Please select at least one zone to display.")
             filtered_data = data
         
-        # Create data summary
-        self.create_data_summary(filtered_data, selected_zones)
-        
-        # Create chart
-        self.create_chart(filtered_data)
+        # Prebuild both datasets for charts to minimize switch lag
+        mean_data = filtered_data[['date', 'zone', 'lmp_mean_c_per_kwh', 'records_used']].copy()
+        median_data = filtered_data[['date', 'zone', 'lmp_median_c_per_kwh', 'records_used']].copy()
+
+        # Show both charts in tabs (load both on first render for instant switching)
+        tabs = st.tabs(["Average (Mean)", "Median"])
+
+        with tabs[0]:
+            self.create_data_summary(mean_data, selected_zones, measure='mean')
+            self.create_chart(mean_data, measure='mean')
+
+        with tabs[1]:
+            self.create_data_summary(median_data, selected_zones, measure='median')
+            self.create_chart(median_data, measure='median')
         
         # Additional PJM-specific functionality
         st.subheader("PJM Average LMP")
