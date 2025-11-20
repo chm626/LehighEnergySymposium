@@ -1,4 +1,7 @@
 # Main Streamlit application with modular tab structure
+# Import TypedDict compatibility patch before loading Streamlit
+import core.streamlit_patch  # noqa: F401
+
 import streamlit as st
 import importlib
 from config.settings import Settings

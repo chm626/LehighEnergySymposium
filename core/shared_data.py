@@ -1,6 +1,7 @@
 # Shared data cache manager for all modules
 import streamlit as st
 import pandas as pd
+import numpy as np
 from core.database import db_manager
 
 class SharedDataManager:
@@ -26,6 +27,42 @@ class SharedDataManager:
             'Met Ed': 'Met Ed',
             'Pike County Light': 'Pike County Light and Power',
             'Pike County Light and Power': 'Pike County Light and Power',
+        }
+
+        # Mapping used by notebook-style data preparation
+        self.service_type_map = {
+            "R": "default_rate",
+            "R - Regular Residential Service": "default_rate",
+            "RS": "default_rate",
+            "RS - Regular Residential Service": "default_rate",
+            "RH": "default_rh_rate",
+            "RH - Residential Heating Service": "default_rh_rate",
+            "RA": "default_ra_rate",
+            "RA - Residential Add - on Heat Pump Service": "default_ra_rate",
+            "GS - General Service Small Non - Demand Metered": "default_rate_without_demand_meter",
+            "GS - General Service Small (under 50kW)": "default_rate_without_demand_meter",
+            "default_rate": "default_rate",
+            "default_heat_rate": "default_rh_rate",
+            "default_heat_pump_rate": "default_ra_rate",
+        }
+
+        self.utility_replace_map = {
+            'Pike County Light & Power': 'Pike County Light and Power',
+            'Pike County Light': 'Pike County Light and Power',
+            'Met-Ed': 'Met Ed',
+            'Met Ed': 'Met Ed',
+        }
+
+        self.plan_type_display_map = {
+            "default_rate": "R - Regular Residential Service",
+            "default_rh_rate": "RH - Residential Heating Service",
+            "default_ra_rate": "RA - Residential Add-on Heat Pump Service",
+            "default_rate_without_demand_meter": "RWD - Regular Residential Service without Demand Meter",
+            "default_rate_with_demand_meter": "RD - Regular Residential Service with Demand Meter",
+            "R": "R - Regular Residential Service",
+            "RS": "R - Regular Residential Service",
+            "RH": "RH - Residential Heating Service",
+            "RA": "RA - Residential Add-on Heat Pump Service",
         }
     
     def normalize_edc_names(self, df, edc_column='edc'):
@@ -218,7 +255,7 @@ class SharedDataManager:
         return grouped_data[['date', 'edc', 'egs', 'avg_rate', 'source']]
     
     def get_egs_data_for_ptc_module(self, edc=None, conform=False):
-        """Get EGS data formatted for PTC module, including monthly offer counts (count_offers)."""
+        """Get EGS data formatted for PTC module"""
         raw_data = self.get_raw_egs_data()
         if raw_data.empty:
             return pd.DataFrame()
@@ -247,17 +284,17 @@ class SharedDataManager:
             ]
             
             if not conformed_data.empty:
-                grouped = conformed_data.groupby(['date', 'edc'])['rate']
-                averaged_data = grouped.agg(avg_rate='mean', count_offers='size').reset_index()
+                averaged_data = conformed_data.groupby(['date', 'edc'])['rate'].mean().reset_index()
+                averaged_data['avg_rate'] = averaged_data['rate']
                 averaged_data['source'] = 'Conformed EGS'
-                return averaged_data[['date', 'edc', 'avg_rate', 'count_offers', 'source']]
+                return averaged_data[['date', 'edc', 'avg_rate', 'source']]
             return pd.DataFrame()
         else:
-            # Regular averaging with counts
-            grouped = raw_data.groupby(['date', 'edc'])['rate']
-            averaged_data = grouped.agg(avg_rate='mean', count_offers='size').reset_index()
+            # Regular averaging
+            averaged_data = raw_data.groupby(['date', 'edc'])['rate'].mean().reset_index()
+            averaged_data['avg_rate'] = averaged_data['rate']
             averaged_data['source'] = 'Combined Average'
-            return averaged_data[['date', 'edc', 'avg_rate', 'count_offers', 'source']]
+            return averaged_data[['date', 'edc', 'avg_rate', 'source']]
     
     def get_egs_data_for_fees_module(self, edc=None):
         """Get EGS data formatted for fees module (WattBuy only, all fee columns)"""
@@ -297,6 +334,221 @@ class SharedDataManager:
             ]
         
         return raw_data
+
+    # ------------------------------------------------------------------
+    # Notebook-style data preparation (WattBuy-only, 12-month, no fees)
+    # ------------------------------------------------------------------
+    @st.cache_data
+    def get_wattbuy_offer_rows(_self):
+        """Direct WattBuy offer feed with daily timestamps."""
+        query = "SELECT * FROM v_wattbuy_simple"
+        df = db_manager.execute_query(query)
+        if df.empty:
+            return df
+
+        expected_columns = [
+            'entry_id',
+            'utility_name',
+            'supplier_name',
+            'rate_type',
+            'plan_type',
+            'term',
+            'rate_amount',
+            'created_at',
+            'enrollment_fee',
+            'monthly_charge',
+            'early_term_fee',
+            'green_percentage',
+            'green_details',
+            'is_green'
+        ]
+        df = df.iloc[:, :len(expected_columns)]
+        df.columns = expected_columns
+
+        df = df[
+            df['utility_name'].notna() &
+            df['created_at'].notna() &
+            df['rate_amount'].notna()
+        ].copy()
+        df = df[pd.to_datetime(df['created_at']).dt.year >= 2010]
+
+        df['created_at'] = pd.to_datetime(df['created_at'])
+        df['rate_amount'] = pd.to_numeric(df['rate_amount'], errors='coerce') / 100.0
+        df['enrollment_fee'] = pd.to_numeric(df['enrollment_fee'], errors='coerce')
+        df['monthly_charge'] = pd.to_numeric(df['monthly_charge'], errors='coerce')
+        df['early_term_fee'] = pd.to_numeric(df['early_term_fee'], errors='coerce')
+        df['plan_type'] = df['plan_type'].fillna('default_rate')
+        df['plan_type'] = df['plan_type'].map(_self.plan_type_display_map).fillna(df['plan_type'])
+        df['utility_name'] = df['utility_name'].replace(_self.utility_replace_map)
+        return df
+
+    @st.cache_data
+    def get_wattbuy_ptc_rows(_self):
+        """PTC feed from v_ptc_wattbuyplans, filtered to base residential rows."""
+        query = "SELECT * FROM v_ptc_wattbuyplans"
+        df = db_manager.execute_query(query)
+        if df.empty:
+            return df
+
+        expected_columns = [
+            'entry_id',
+            'utility_name',
+            'created_at',
+            'plan_type',
+            'rate_type_utility',
+            'rate_value_utility_amount',
+            'rate_min_limit',
+            'rate_max_limit',
+            'rate_seq'
+        ]
+        df = df.iloc[:, :len(expected_columns)]
+        df.columns = expected_columns
+
+        df = df[
+            df['utility_name'].notna() &
+            df['created_at'].notna() &
+            df['rate_value_utility_amount'].notna()
+        ].copy()
+
+        df['created_at'] = pd.to_datetime(df['created_at'])
+        df = df[df['created_at'].dt.year >= 2010]
+
+        df['rate_value_utility_amount'] = pd.to_numeric(
+            df['rate_value_utility_amount'], errors='coerce'
+        ) / 100.0
+        df['plan_type'] = df['plan_type'].fillna(df['rate_type_utility'])
+        df['plan_type'] = df['plan_type'].fillna('default_rate')
+        df['plan_type'] = df['plan_type'].map(_self.plan_type_display_map).fillna(df['plan_type'])
+        df['utility_name'] = df['utility_name'].replace(_self.utility_replace_map)
+        df['rate_min_limit'] = pd.to_numeric(df['rate_min_limit'], errors='coerce')
+        df['rate_max_limit'] = pd.to_numeric(df['rate_max_limit'], errors='coerce')
+        df = df[
+            ((df['rate_min_limit'].isna()) | (df['rate_min_limit'] == 0)) &
+            ((df['rate_max_limit'].isna()) | (df['rate_max_limit'] == 0))
+        ]
+        df['source_priority'] = 0  # prefer WattBuy records
+        return df[['utility_name', 'created_at', 'plan_type', 'rate_value_utility_amount', 'source_priority']]
+
+    @st.cache_data
+    def get_ptc_agg_daily_rows(_self):
+        """Daily-expanded PTC rows derived from v_ptc_agg to mirror notebook logic."""
+        query = """
+        SELECT
+            edc,
+            service_type,
+            source,
+            rate,
+            start_date,
+            end_date
+        FROM v_ptc_agg
+        WHERE edc IS NOT NULL
+          AND rate IS NOT NULL
+          AND start_date IS NOT NULL
+          AND end_date IS NOT NULL
+          AND YEAR(start_date) >= 2010
+        """
+        df = db_manager.execute_query(query)
+        if df.empty:
+            return df
+
+        df['start_date'] = pd.to_datetime(df['start_date'])
+        df['end_date'] = pd.to_datetime(df['end_date'])
+        swap_mask = df['end_date'] < df['start_date']
+        if swap_mask.any():
+            df.loc[swap_mask, ['start_date', 'end_date']] = df.loc[
+                swap_mask, ['end_date', 'start_date']
+            ].to_numpy()
+
+        df['service_type'] = df['service_type'].map(_self.service_type_map).fillna(df['service_type'])
+        df['rate'] = pd.to_numeric(df['rate'], errors='coerce') / 100.0
+        df['edc'] = df['edc'].replace(_self.utility_replace_map)
+        df = df.dropna(subset=['rate'])
+
+        df['date_range'] = [
+            pd.date_range(s, e, freq='D')
+            for s, e in zip(df['start_date'], df['end_date'])
+        ]
+        exploded = (
+            df[['edc', 'service_type', 'rate', 'date_range']]
+            .explode('date_range', ignore_index=True)
+            .rename(columns={
+                'edc': 'utility_name',
+                'service_type': 'plan_type',
+                'date_range': 'created_at',
+                'rate': 'rate_value_utility_amount'
+            })
+        )
+        exploded['plan_type'] = exploded['plan_type'].map(_self.plan_type_display_map).fillna(exploded['plan_type'])
+        exploded['source_priority'] = 1  # fallback priority
+        return exploded[['utility_name', 'created_at', 'plan_type', 'rate_value_utility_amount', 'source_priority']]
+
+    @st.cache_data
+    def get_notebook_style_ptc_rates(_self):
+        """Combined PTC rates with WattBuy priority, matching notebook behaviour."""
+        wattbuy_ptc = _self.get_wattbuy_ptc_rows()
+        agg_ptc = _self.get_ptc_agg_daily_rows()
+
+        if wattbuy_ptc.empty and agg_ptc.empty:
+            return pd.DataFrame()
+
+        combined = pd.concat([wattbuy_ptc, agg_ptc], ignore_index=True)
+        combined = combined.dropna(subset=['utility_name', 'created_at', 'plan_type'])
+        combined = combined.sort_values(
+            by=['utility_name', 'plan_type', 'created_at', 'source_priority']
+        )
+        combined = combined.drop_duplicates(
+            subset=['utility_name', 'plan_type', 'created_at'],
+            keep='first'
+        )
+        return combined[['utility_name', 'created_at', 'plan_type', 'rate_value_utility_amount']]
+
+    @st.cache_data
+    def get_notebook_style_dataset(_self):
+        """Replicate the WattBuy-only, 12-month, fee-free dataset used in the notebook."""
+        offers = _self.get_wattbuy_offer_rows()
+        ptc = _self.get_notebook_style_ptc_rates()
+
+        if offers.empty or ptc.empty:
+            return pd.DataFrame()
+
+        offers = offers.copy()
+        offers['plan_type'] = offers['plan_type'].fillna('default_rate')
+        offers['created_at'] = offers['created_at'].dt.floor('D')
+
+        # Apply notebook-style filters
+        offers = offers[
+            (offers['rate_type'].str.lower().str.contains('fixed', na=False)) &
+            (offers['term'] == 12)
+        ].copy()
+
+        offers['enrollment_fee'] = offers['enrollment_fee'].fillna(0)
+        offers['monthly_charge'] = offers['monthly_charge'].fillna(0)
+        offers['early_term_fee'] = offers['early_term_fee'].fillna(0)
+
+        offers = offers[
+            (offers['enrollment_fee'] == 0) &
+            (offers['monthly_charge'] == 0) &
+            (offers['early_term_fee'] == 0)
+        ]
+
+        offers['utility_name'] = offers['utility_name'].replace(_self.utility_replace_map)
+
+        merged = pd.merge(
+            offers,
+            ptc,
+            on=['utility_name', 'created_at', 'plan_type'],
+            how='left',
+            validate='many_to_one'
+        )
+
+        merged = merged.dropna(subset=['rate_value_utility_amount'])
+        merged['below_equal'] = merged['rate_amount'] <= merged['rate_value_utility_amount']
+        merged['cat_term'] = merged['term'].apply(
+            lambda x: '<12' if pd.notna(x) and x < 12 else ('12' if x == 12 else '>12')
+        )
+        merged['cat_term'] = merged['cat_term'].fillna('Unknown')
+        merged['created_at'] = pd.to_datetime(merged['created_at'])
+        return merged
 
 # Global shared data manager instance
 shared_data_manager = SharedDataManager()
